@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terra-packager"
+version = "1.0.0"
+description = "Offline Arknights gamedata packager for EPUB, PDF, and TXT output."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "scripts/assets/licenses/*.txt"]
+dependencies = [
+    "fonttools>=4.0",
+]
+
+[project.scripts]
+terra-packager = "scripts.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["scripts"]
+namespaces = false
+
+[tool.setuptools.package-data]
+scripts = ["templates/*.typ", "templates/*.css", "assets/fonts/*.ttf", "assets/licenses/*.txt"]
+
+[tool.setuptools.exclude-package-data]
+scripts = ["bin/*"]
+

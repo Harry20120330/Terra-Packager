@@ -1,0 +1,8 @@
+include README.md README.zh.md LICENSE NOTICE
+prune tests
+prune scripts/bin
+prune .venv
+prune build
+prune dist
+prune tmp
+global-exclude __pycache__ *.py[cod]

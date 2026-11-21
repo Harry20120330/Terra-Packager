@@ -1,0 +1,30 @@
+name: Package checks
+on: [push, pull_request]
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install build dependencies
+        run: python -m pip install build setuptools wheel
+      - name: Build source and wheel distributions
+        run: python -m build
+      - name: Install and inspect CLI
+        shell: bash
+        run: |
+          python -m pip install dist/*.whl
+          terra-packager --help
+          terra-packager build --help
+          terra-packager doctor -f txt --cache-dir tmp/cache -o tmp/output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.os }}-${{ matrix.python }}
+          path: dist/*

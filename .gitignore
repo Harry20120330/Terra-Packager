@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uv-cache/
+
+# Local data and generated outputs
+.cache/
+check/
+ArknightsGamedata/
+output/
+/data/
+/output/
+*.epub
+*.pdf
+*.zip
+*.log
+tmp/
+build/
+dist/
+/scripts/bin/
+/tests/
+/.pytest_cache/

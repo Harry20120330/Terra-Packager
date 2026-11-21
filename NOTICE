@@ -1,0 +1,56 @@
+Terra Packager
+Copyright 2026 Harry20120330
+https://github.com/Harry20120330/Terra-Packager
+
+Terra Packager is licensed under the Apache License, Version 2.0.
+See LICENSE for the full project license text.
+
+Bundled fonts
+-------------
+
+This product includes EB Garamond font software.
+Copyright 2017 The EB Garamond Project Authors
+(https://github.com/octaviopardo/EBGaramond12).
+Licensed under the SIL Open Font License, Version 1.1.
+See scripts/assets/licenses/OFL-EBGaramond.txt.
+
+This product includes Cormorant Garamond font software.
+Copyright 2015 The Cormorant Project Authors
+(https://github.com/CatharsisFonts/Cormorant).
+Licensed under the SIL Open Font License, Version 1.1.
+See scripts/assets/licenses/OFL-Cormorant.txt.
+
+External fonts
+--------------
+
+Noto Serif CJK fonts are supplied by the user or operating system and may
+be subsetted and embedded in generated EPUB files.
+The included Noto license texts identify:
+Copyright 2012 Google Inc. All Rights Reserved.
+Licensed under the SIL Open Font License, Version 1.1.
+See scripts/assets/licenses/OFL-NotoSerifSC.txt,
+scripts/assets/licenses/OFL-NotoSerifTC.txt,
+scripts/assets/licenses/OFL-NotoSerifJP.txt, and
+scripts/assets/licenses/OFL-NotoSerifKR.txt.
+Preserve the license notices accompanying any additional fonts you supply.
+
+Build tools
+-----------
+
+This product uses Typst (https://github.com/typst/typst), licensed under
+the Apache License, Version 2.0. Typst is installed separately or downloaded
+on demand into the user cache. This project does not bundle the Typst executable.
+
+This product uses fonttools (https://github.com/fonttools/fonttools),
+licensed under the MIT License. It is installed as a separate dependency.
+Its own distribution contains its copyright and license notices.
+
+External game data
+------------------
+
+This product can read data published by ArknightsAssets/ArknightsGamedata,
+Kengxxiao/ArknightsGameData, and Kengxxiao/ArknightsGameData_YoStar.
+Actual game data is not bundled with this project.
+Arknights stories, characters, and other game content remain the property
+of their respective rights holders. The project and font licenses do not
+grant rights to that content.
