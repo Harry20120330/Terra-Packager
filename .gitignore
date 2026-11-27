@@ -20,5 +20,5 @@ tmp/
 build/
 dist/
 /scripts/bin/
-/tests/
 /.pytest_cache/
+/tests/

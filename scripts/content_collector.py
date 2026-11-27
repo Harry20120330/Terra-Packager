@@ -9,10 +9,11 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .build_diagnostics import BuildDiagnostics
-from .dag_linearizer import LinearBlock, LinearSection
+from .dag_linearizer import LinearBlock, LinearSection, OperatorEntry
 from .i18n import LANGUAGES, apply_nickname
 from .repo_provider import ExternalRepoProvider
 
@@ -148,21 +149,7 @@ def _record_map(table: dict, wrapper: str, prefix: str) -> Dict[str, dict]:
 
 
 def _character_names(provider: ExternalRepoProvider, active: Sequence[str], use_cache: bool) -> Dict[str, Dict[str, str]]:
-    key = tuple(sorted(active))
-    if key in provider._character_names_cache:
-        return provider._character_names_cache[key]
-    result: Dict[str, Dict[str, str]] = {}
-    for lang, table in _tables(provider, "excel/character_table.json", active, use_cache).items():
-        chars = table.get("chars", table)
-        if not isinstance(chars, dict):
-            raise ValueError("Expected an object in character_table.json")
-        for char_id, character in chars.items():
-            if isinstance(character, dict):
-                name = _first_text(character, "name", "charName", "appellation")
-                if name:
-                    result.setdefault(str(char_id), {})[lang] = name
-    provider._character_names_cache[key] = result
-    return result
+    return provider.get_character_names(active, use_cache)
 
 
 def _reference_blocks(
@@ -374,18 +361,43 @@ def _module_sections(
         scene_id = _stable_id("operator-module", module_id)
         rows = {lang: _module_rows(record, lang) for lang, record in record_by_lang.items()}
         blocks = _reference_blocks(scene_id, rows, active, custom_nickname)
-        char_id = _first_text(source, "charId", "charID")
+        char_id = _first_text(source, "charId", "charID") or next(
+            (value for record in record_by_lang.values() if (value := _first_text(record, "charId", "charID"))), ""
+        )
         character_names = names.get(char_id, {})
         module_names = {lang: _first_text(record, "uniEquipName", "moduleName", "name") for lang, record in record_by_lang.items()}
         fallback_name = module_names.get("zh") or next((name for name in module_names.values() if name), module_id)
         fallback_char = character_names.get("zh") or next(iter(character_names.values()), char_id)
-        titles = {}
-        for lang in LANGUAGES:
-            character = character_names.get(lang) or fallback_char
-            name = module_names.get(lang) or fallback_name
-            titles[lang] = f"{character} · {name}" if character else name
-        sections.append(LinearSection(scene_id=scene_id, raw_tag="", titles=titles, blocks=blocks))
+        operator_names = {lang: character_names.get(lang) or fallback_char for lang in LANGUAGES}
+        entry_titles = {lang: module_names.get(lang) or fallback_name for lang in LANGUAGES}
+        titles = {lang: f"{operator_names[lang]} · {title}" if operator_names[lang] else title
+                  for lang, title in entry_titles.items()}
+        operator_entry = OperatorEntry(char_id, operator_names, entry_titles) if char_id else None
+        sections.append(LinearSection(scene_id=scene_id, raw_tag="", titles=titles, blocks=blocks,
+                                      operator_entry=operator_entry))
     return sections
+
+
+def group_operator_entries(content_type: str, sections: List[LinearSection]) -> List[LinearSection]:
+    """Group record or module entries for the combined EPUB without listing record scenes."""
+    groups: Dict[str, List[LinearSection]] = {}
+    group: List[LinearSection] = []
+    owner = None
+    for section in sections:
+        if section.heading_level == 1:
+            owner = section.operator_entry
+            group = groups.setdefault(owner.operator_id if owner else section.scene_id, [])
+            if owner and not group:
+                group.append(LinearSection(
+                    scene_id=_stable_id(f"{content_type}_owner", owner.operator_id), raw_tag="",
+                    titles=owner.operator_names, blocks=[], is_divider=True,
+                ))
+            if owner:
+                section = replace(section, titles=owner.entry_titles, heading_level=2)
+        elif owner:
+            section = replace(section, heading_level=section.heading_level + 1, include_in_toc=False)
+        group.append(section)
+    return [section for group in groups.values() for section in group]
 
 
 def _rename_scene(section: LinearSection, content_type: str, group_id: str) -> None:
@@ -439,6 +451,8 @@ def collect_type_sections(
             if not scenes_meta:
                 continue
             volume_sections: List[LinearSection] = []
+            owner = (OperatorEntry(volume["operatorId"], volume["operatorNames"], volume["entryTitles"])
+                     if volume.get("operatorId") else None)
             divider = LinearSection(
                 scene_id=_stable_id("volume", str(volume["groupId"])),
                 raw_tag=volume.get("volumeNumber") or "",
@@ -446,6 +460,7 @@ def collect_type_sections(
                 blocks=[],
                 heading_level=1,
                 is_divider=True,
+                operator_entry=owner,
             )
             for meta in scenes_meta:
                 completed += 1

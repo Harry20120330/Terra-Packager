@@ -23,10 +23,10 @@ h4, h5, h6 { font-size: 1.05em; margin: 0.2em 0; }
 .trail > .section-head { margin-bottom: 0.85em; }
 .exchange { margin: 0; padding-bottom: 0.85em; page-break-inside: auto; break-inside: auto; }
 .exchange.short { page-break-inside: avoid; break-inside: avoid; }
-.utterance { orphans: 2; widows: 2; overflow-wrap: anywhere; word-wrap: break-word; }
+.utterance, .compact-prose { white-space: pre-wrap; orphans: 2; widows: 2;
+                            overflow-wrap: anywhere; word-wrap: break-word; }
+.compact-prose { font-size: 1em; }
 .utterance + .utterance { margin-top: 0.35em; }
-.speaker-name { font-weight: 600; }
-.source-text { font-size: 1em; white-space: pre-wrap; }
 .prose-paragraph + .prose-paragraph { margin-top: 0.45em; }
 .paragraph-follow { margin-top: 0.45em; }
 .translation { margin-top: 0.3em; }
@@ -39,11 +39,8 @@ h4, h5, h6 { font-size: 1.05em; margin: 0.2em 0; }
 .card .translation { margin-top: 0.12em; }
 .card .utterance + .utterance { margin-top: 0.12em; }
 .chapter-card { margin: 0.2em 0 1.1em; }
-.chapter-card .source-text { font-size: 1.4em; font-weight: 600; }
 .heading-card { margin: 0.2em 0 1em; page-break-after: avoid; break-after: avoid; }
-.heading-card .source-text { font-size: 1.2em; font-weight: 600; }
 .trail .card { margin: 0.65em 0 1.1em; }
-.trail .card .source-text { font-size: 0.95em; }
 .branch-label, .choice-label, .notice { font-size: 0.9em; margin: 1.1em 0 0.5em;
                               page-break-after: avoid; break-after: avoid; font-weight: 600; }
 .branch-label .label-title, .choice-label { font-weight: 600; }
@@ -54,10 +51,7 @@ h4, h5, h6 { font-size: 1.05em; margin: 0.2em 0; }
 .choices li { padding-left: 0.15em; margin: 0 0 0.65em; }
 .choices li.short { page-break-inside: avoid; break-inside: avoid; }
 .choices .utterance + .utterance { margin-top: 0.2em; }
-.cover { margin: 0; text-align: center; }
-.cover-image { display: block; width: 90%; max-width: 420px; height: auto; margin: 0 auto; }
-.book-navigation { margin: 1em 0; font-size: 0.9em; text-align: center; }
-.book-navigation a { margin: 0 0.35em; }
+[hidden] { display: none; }
 .book-end { margin-top: 2em; }
 .colophon p { margin: 0 0 0.8em; }
 .colophon { overflow-wrap: anywhere; word-wrap: break-word; }
@@ -65,8 +59,13 @@ h4, h5, h6 { font-size: 1.05em; margin: 0.2em 0; }
 .colophon dd { margin: 0.15em 0 0.8em; }
 nav ol { list-style: none; margin: 0; padding: 0; }
 nav li { margin: 0.65em 0; }
-nav ol ol { padding-left: 1em; font-size: 0.95em; }
-nav ol ol ol { font-size: 1em; }
+nav ol ol { padding-left: 1.4em; }
+.toc-level-1 > li > a { font-size: 1.1em; font-weight: 600; }
+.toc-level-2 > li > a { font-size: 1em; font-weight: 600; }
+.toc-level-3 > li > a { font-size: 0.9em; }
 nav a { text-decoration: none; }
+.quick-index { margin-bottom: 1.5em; }
+.quick-index ul { list-style: none; margin: 0.6em 0 0.8em; padding: 0; }
+.quick-index li { margin: 0.3em 0; }
 .nav-subtitle { display: block; margin-top: 0.08em; }
 .landmarks { margin-top: 2em; }

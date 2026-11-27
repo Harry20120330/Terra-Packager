@@ -58,6 +58,8 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
     "zh": {
         "cover_sub": "剧 情 文 库",
         "toc_heading": "目录 / Contents",
+        "toc_overview": "简明索引",
+        "toc_details": "详细目录",
         "story_heading": "正文 / Story",
         "cover_nav_start": "开始阅读 / Start reading",
         "cover_nav_toc": "目录 / Contents",
@@ -72,6 +74,8 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
     "tw": {
         "cover_sub": "劇 情 文 庫",
         "toc_heading": "目錄 / Contents",
+        "toc_overview": "簡明索引",
+        "toc_details": "詳細目錄",
         "story_heading": "正文 / Story",
         "cover_nav_start": "開始閱讀 / Start reading",
         "cover_nav_toc": "目錄 / Contents",
@@ -86,6 +90,8 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
     "en": {
         "cover_sub": "S T O R Y   A R C H I V E",
         "toc_heading": "Contents",
+        "toc_overview": "Quick Index",
+        "toc_details": "Detailed Contents",
         "story_heading": "Story",
         "cover_nav_start": "Start reading",
         "cover_nav_toc": "Contents",
@@ -100,6 +106,8 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
     "ja": {
         "cover_sub": "ス ト ー リ ー 文 庫",
         "toc_heading": "目次 / Contents",
+        "toc_overview": "簡易目次",
+        "toc_details": "詳細目次",
         "story_heading": "本文 / Story",
         "cover_nav_start": "読み始める / Start reading",
         "cover_nav_toc": "目次 / Contents",
@@ -114,6 +122,8 @@ UI_STRINGS: Dict[str, Dict[str, str]] = {
     "ko": {
         "cover_sub": "스 토 리   문 고",
         "toc_heading": "목차 / Contents",
+        "toc_overview": "간략 목차",
+        "toc_details": "상세 목차",
         "story_heading": "본문 / Story",
         "cover_nav_start": "읽기 시작 / Start reading",
         "cover_nav_toc": "목차 / Contents",
@@ -150,6 +160,13 @@ STAGE_PHASE_MAP: Dict[str, Dict[str, str]] = {
         "ko": "막간",
     },
 }
+
+
+def format_utterance_line(speaker: str, text: str, lang: str) -> str:
+    if speaker:
+        colon = UI_STRINGS.get(lang, UI_STRINGS["zh"])["colon"]
+        return f"{speaker}{colon}{text}"
+    return text
 
 
 def localize_stage_tag(raw_tag: str, lang: str) -> str:

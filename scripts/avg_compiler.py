@@ -13,15 +13,15 @@ RICH_TAG_RE = re.compile(
     r"</?(?:(?:color|i|b|u|size)(?=[\s=>/])[^>]*|[@$][^>\s]+[^>]*)>|</>",
     re.IGNORECASE,
 )
+TEXT_SLOT_RE = re.compile(r"[ \t]*<p\s*=\s*[0-9]+\s*>[ \t]*", re.IGNORECASE)
 
 
 def _clean_avg_text(raw: str, lang: str) -> str:
     if not raw:
         return ""
     txt = raw.replace("\\n", " ").replace('\\"', '"')
-    txt = RICH_TAG_RE.sub("", txt)
-    txt = txt.replace("</>", "")
-    return txt.strip()
+    txt = RICH_TAG_RE.sub("", txt).replace("{@nbs}", "\u00a0")
+    return TEXT_SLOT_RE.sub("\n", txt).strip()
 
 
 def _parse_attrs(attr_str: str) -> Dict[str, str]:
@@ -44,6 +44,14 @@ def parse_raw_avg_tokens(raw_txt: str, lang: str) -> List[Dict[str, Any]]:
     multiline_buf: List[str] = []
     multiline_spk: str = ""
 
+    def flush_multiline() -> None:
+        nonlocal multiline_spk
+        joined = "".join(multiline_buf).strip()
+        if joined:
+            tokens.append({"kind": "utterance", "speaker": multiline_spk, "text": joined})
+        multiline_buf.clear()
+        multiline_spk = ""
+
     for raw_line in raw_txt.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("//"):
@@ -52,6 +60,7 @@ def parse_raw_avg_tokens(raw_txt: str, lang: str) -> List[Dict[str, Any]]:
         # 1. [name="Speaker"] Dialogue text
         m_name = re.match(r'^\[name\s*=\s*"([^"]*)"\s*\](.*)$', line, re.IGNORECASE)
         if m_name:
+            flush_multiline()
             spk = _clean_avg_text(m_name.group(1), lang)
             txt = _clean_avg_text(m_name.group(2), lang)
             if txt:
@@ -77,11 +86,7 @@ def parse_raw_avg_tokens(raw_txt: str, lang: str) -> List[Dict[str, Any]]:
 
         # Flush any dangling multiline buffer before other directives
         if multiline_buf:
-            joined = "".join(multiline_buf).strip()
-            if joined:
-                tokens.append({"kind": "utterance", "speaker": multiline_spk, "text": joined})
-            multiline_buf = []
-            multiline_spk = ""
+            flush_multiline()
 
         # 3. Other bracketed directives
         m_dir = re.match(r"^\[([A-Za-z0-9_]+)(?:\((.*)\))?\](.*)$", line)
@@ -102,7 +107,7 @@ def parse_raw_avg_tokens(raw_txt: str, lang: str) -> List[Dict[str, Any]]:
                     # A structural branch without a label is not source prose.
                     # Do not manufacture text that can masquerade as a translation.
                     opts.append("")
-                tokens.append({"kind": "decision", "options": opts[: len(vals)], "values": vals})
+                tokens.append({"kind": "decision", "options": opts, "values": vals})
 
             elif dname == "predicate":
                 refs_raw = attrs.get("references")
@@ -163,11 +168,32 @@ def _has_source_text(tokens: List[Dict[str, Any]]) -> bool:
     )
 
 
+def _predicate_scope(scopes: list, refs: list, source: str) -> tuple[int, Set[str]]:
+    wanted = set(refs)
+    for index in range(len(scopes) - 1, -1, -1):
+        if wanted <= set(scopes[index]["values"]):
+            return index, wanted
+    # Child decisions in different outer branches can rejoin using their
+    # combined values, e.g. 4;5;6 and 7;8;9 under outer choices 1 and 2.
+    for index in range(len(scopes) - 1, -1, -1):
+        aliases = {**scopes[index]["descendants"],
+                   **{value: {value} for value in scopes[index]["values"]}}
+        if wanted <= aliases.keys():
+            return index, set().union(*(aliases[ref] for ref in wanted))
+    raise ValueError(f"Unknown predicate references {refs}: {source}")
+
+
+def _remember_child(scopes: list, values: list) -> None:
+    for scope in scopes:
+        active = set(scope["active"] or scope["values"])
+        for ref in values:
+            scope["descendants"].setdefault(ref, set()).update(active)
+
+
 def _normalize_structure(tokens: List[Dict[str, Any]], source: str) -> List[Dict[str, Any]]:
-    """Ignore ineffective bare predicates; reject references without a scope."""
+    """Validate scopes, all-option gates, shared values, and nested joins."""
     result = []
-    scopes: List[Set[str]] = []
-    selected: List[bool] = []
+    scopes: List[Dict[str, Any]] = []
     for token in tokens:
         if token["kind"] == "predicate":
             refs = token["refs"]
@@ -177,30 +203,33 @@ def _normalize_structure(tokens: List[Dict[str, Any]], source: str) -> List[Dict
                 continue
             if refs is None:
                 scopes.pop()
-                selected.pop()
             else:
-                wanted = set(refs)
-                matches = [i for i, scope in enumerate(scopes) if wanted <= scope]
-                if not matches:
-                    raise ValueError(f"Unknown predicate references {refs}: {source}")
-                match = matches[-1]
+                match, wanted = _predicate_scope(scopes, refs, source)
                 del scopes[match + 1:]
-                del selected[match + 1:]
-                if wanted == scopes[-1]:
+                scope = scopes[-1]
+                if wanted == set(scope["values"]) and scope["branched"]:
                     scopes.pop()
-                    selected.pop()
                 else:
-                    selected[-1] = True
+                    scope["active"] = wanted
+                    scope["branched"] = wanted != set(scope["values"])
         else:
-            if scopes and not selected[-1]:
-                scopes.pop()
-                selected.pop()
+            if scopes and not scopes[-1]["active"]:
+                if token["kind"] == "utterance":
+                    scopes[-1]["active"] = set(scopes[-1]["values"])
+                else:
+                    scopes.pop()
             if token["kind"] == "decision":
                 values = token["values"]
-                if not values or len(values) != len(set(values)):
-                    raise ValueError(f"Empty or duplicate decision values: {source}")
-                scopes.append(set(values))
-                selected.append(False)
+                if not values:
+                    raise ValueError(f"Empty decision values: {source}")
+                if len(token["options"]) > len(values):
+                    raise ValueError(f"Unmapped decision options: {source}")
+                # A choice with only a shared response is complete when the
+                # next choice starts; genuinely selected branches stay nested.
+                while scopes and scopes[-1]["active"] and not scopes[-1]["branched"]:
+                    scopes.pop()
+                _remember_child(scopes, values)
+                scopes.append({"values": values, "active": set(), "branched": False, "descendants": {}})
         result.append(token)
     return result
 
@@ -263,23 +292,37 @@ def _compile_stream(stream: List[Dict[str, Any]], scene_id: str) -> Dict[str, An
             if refs is None:
                 close()
             else:
-                wanted = set(refs)
-                matches = [i for i, scope in enumerate(stack) if wanted <= set(scope["values"])]
-                if not matches:
-                    raise ValueError(f"Unknown predicate references {refs}: {scene_id}")
-                while len(stack) - 1 > matches[-1]:
+                match, wanted = _predicate_scope(stack, refs, scene_id)
+                while len(stack) - 1 > match:
                     close()
-                if wanted == set(stack[-1]["values"]):
+                scope = stack[-1]
+                if wanted == set(scope["values"]) and scope["branched"]:
                     close()
                 else:
-                    stack[-1]["active"] = [v for v in stack[-1]["values"] if v in wanted]
+                    # Before any branch, an all-option predicate gates a shared
+                    # prefix. It must keep the decision open for later subsets.
+                    scope["active"] = [v for v in scope["values"] if v in wanted]
+                    scope["branched"] = wanted != set(scope["values"])
             continue
         if stack and not stack[-1]["active"]:
-            close()
-        value = node()
-        connect(current(), value)
-        advance(value)
-        line_id = f"{scene_id}:{value['id']}"
+            if kind == "utterance":
+                stack[-1]["active"] = list(stack[-1]["values"])
+            else:
+                close()
+        if kind == "decision":
+            while stack and stack[-1]["active"] and not stack[-1]["branched"]:
+                close()
+        shared_prefix = kind == "utterance" and stack and not stack[-1]["branched"]
+        if shared_prefix:
+            # Prose gated by every option precedes the actual split. Store it
+            # after the choice event, without merging the branch frontiers.
+            value = stack[-1]["node"]
+            line_id = f"{scene_id}:{value['id']}:shared:{len(lines) + 1}"
+        else:
+            value = node()
+            connect(current(), value)
+            advance(value)
+            line_id = f"{scene_id}:{value['id']}"
         value["events"].append(line_id)
         if kind == "utterance":
             line = {"id": line_id, "nodeId": value["id"], "type": "dialogue"}
@@ -290,8 +333,11 @@ def _compile_stream(stream: List[Dict[str, Any]], scene_id: str) -> Dict[str, An
                         **{lang: opt.get(lang, "") for lang in LANGUAGES}}
                        for i, opt in enumerate(item["options"], 1)]
             line = {"id": line_id, "nodeId": value["id"], "type": "choice", "options": options}
-            stack.append({"values": item["values"], "active": [],
-                          "tails": {ref: [opt] for ref, opt in zip(item["values"], options)}})
+            values = list(dict.fromkeys(item["values"]))
+            _remember_child(stack, values)
+            stack.append({"values": values, "active": [], "branched": False, "descendants": {}, "node": value,
+                          "tails": {ref: [opt for value, opt in zip(item["values"], options) if value == ref]
+                                    for ref in values}})
         lines.append(line)
     while stack:
         close()
@@ -323,11 +369,15 @@ def _merge_tokens(tokens_by_lang: Dict[str, list], base_lang: str) -> list:
             stream.append(anchor)
         else:
             options = []
+            occurrences: Dict[str, int] = {}
             for ref in anchor["values"]:
+                occurrence = occurrences.get(ref, 0)
+                occurrences[ref] = occurrence + 1
                 option = {"value": ref}
                 for lang, (localized, _) in split.items():
                     choice = localized[index]
-                    option[lang] = choice["options"][choice["values"].index(ref)]
+                    positions = [i for i, value in enumerate(choice["values"]) if value == ref]
+                    option[lang] = choice["options"][positions[occurrence]]
                 options.append(option)
             stream.append({"kind": "decision", "values": anchor["values"], "options": options})
     return stream
@@ -345,9 +395,30 @@ def compile_scene_from_repo(
            if (text := provider.fetch_text(lang, path, use_cache=use_cache))}
     if not raw:
         raise FileNotFoundError(f"Story script not found: {path}")
-    tokens = {lang: _normalize_structure(parse_raw_avg_tokens(text, lang), f"{lang}/{path}")
-              for lang, text in raw.items() if lang in requested}
+    tokens = {}
+    structure_warnings = {}
+    for lang, text in raw.items():
+        parsed = parse_raw_avg_tokens(text, lang)
+        try:
+            tokens[lang] = _normalize_structure(parsed, f"{lang}/{path}")
+        except ValueError as exc:
+            # Some upstream scripts contain dangling, repeated, or forward
+            # references. Preserve every label and paragraph in source order
+            # rather than inventing branch connections or dropping the scene.
+            if "predicate references" not in str(exc) and "Unmapped decision options" not in str(exc):
+                raise
+            structure_warnings[lang] = str(exc)
+            tokens[lang] = [
+                {**token, "values": [str(index) for index in range(1, len(token["options"]) + 1)]}
+                if token["kind"] == "decision" else token
+                for token in parsed if token["kind"] != "predicate"
+            ]
     readable = [lang for lang, items in tokens.items() if _has_source_text(items)]
+    # Video-only AVG files are real catalog scenes with no printable prose.
+    # Keep this distinct from empty files, unlabeled choices, and lost text.
+    media_only = [lang for lang, items in tokens.items() if not items and re.search(
+        r'^\s*\[video\s*\(', raw[lang], flags=re.IGNORECASE | re.MULTILINE,
+    )]
     active = {lang: tokens[lang] for lang in requested if lang in readable}
     if not active:
         active = {lang: tokens[lang] for lang in readable}
@@ -367,6 +438,8 @@ def compile_scene_from_repo(
         result = _compile_stream(_merge_tokens(active, base), scene_id)
         result["alignmentStatus"] = "aligned"
     result.update({"availableLanguages": list(raw), "sourceTextLanguages": readable,
+                   "mediaOnlyLanguages": media_only,
+                   "structureWarnings": structure_warnings,
                    "requestedLanguages": requested, "tag": scene_meta.get("tag", "")})
     result.update({key: value for key, value in scene_meta.items() if key.startswith("title_")})
     return result

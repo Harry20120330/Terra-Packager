@@ -21,6 +21,13 @@ class LinearBlock:
 
 
 @dataclass
+class OperatorEntry:
+    operator_id: str
+    operator_names: Dict[str, str]
+    entry_titles: Dict[str, str]
+
+
+@dataclass
 class LinearSection:
     scene_id: str
     raw_tag: str
@@ -29,6 +36,8 @@ class LinearSection:
     heading_level: int = 1
     is_divider: bool = False
     alignment_status: str = "aligned"
+    operator_entry: Optional[OperatorEntry] = None
+    include_in_toc: bool = True
 
 
 def _build_graph(scene: Dict[str, Any]) -> Tuple[Dict[int, Dict[str, Any]], Dict[str, Dict[str, Any]], List[int]]:
@@ -158,6 +167,7 @@ def linearize_scene(
             events = node.get("events", [])
 
             choice_line: Optional[Dict[str, Any]] = None
+            after_choice: List[LinearBlock] = []
             for eid in events:
                 ln = lines_by_id.get(eid)
                 if not ln:
@@ -175,7 +185,8 @@ def linearize_scene(
                             lang: apply_nickname(ln.get(f"spk_{lang}") or "", lang, custom_nickname)
                             for lang in LANGUAGES
                         }
-                        blocks.append(
+                        destination = after_choice if choice_line is not None else blocks
+                        destination.append(
                             LinearBlock(
                                 kind="utterance",
                                 line_id=ln["id"],
@@ -214,6 +225,7 @@ def linearize_scene(
                         options=opt_items,
                     )
                 )
+                blocks.extend(after_choice)
 
                 # Single option pass-through
                 if len(opt_items) <= 1:
@@ -231,6 +243,7 @@ def linearize_scene(
                     continue
 
                 next_depth = min(depth + 1, 3)
+                branch_guard = set(visited_guard)
                 for idx, t in enumerate(targets, start=1):
                     blocks.append(
                         LinearBlock(
@@ -239,8 +252,8 @@ def linearize_scene(
                             branch_index=idx,
                         )
                     )
-                    branch_guard = set(visited_guard)
                     walk(t, join_node, next_depth, branch_guard)
+                visited_guard.update(branch_guard)
 
                 if join_node is not None and join_node != stop_id and _node_has_visible_content(
                     join_node, stop_id, nodes_by_id, lines_by_id

@@ -1,20 +1,20 @@
-"""Pure local CLI (`terra-packager list | info | build`) for external Arknights Gamedata repos."""
+"""Shared CLI for terra-packager, launch.py, and python -m scripts."""
 
 from __future__ import annotations
 import argparse
-import re
 import subprocess
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from .build_diagnostics import BuildDiagnostics
+from .data_source import add_download_args, prepare_data_source
 from .dag_linearizer import LinearSection
 from .i18n import LANGUAGES
-from .packager import create_zip_bundle, normalize_formats, package_sections, package_volume, sanitize_filename
+from .packager import normalize_formats, package_sections, package_volume, sanitize_filename
 from .repo_provider import ExternalRepoProvider
-from .content_collector import COLLECTION_TITLES, CONTENT_LABELS, CONTENT_TYPES, collect_type_sections
-from .runtime import Measurements, CURRENT_MEASUREMENTS
+from .content_collector import COLLECTION_TITLES, CONTENT_LABELS, CONTENT_TYPES, collect_type_sections, group_operator_entries
+from .runtime import CURRENT_MEASUREMENTS
 from .doctor import check_environment
 
 CATEGORY_ARG_MAP = {
@@ -25,9 +25,6 @@ CATEGORY_ARG_MAP = {
     "operator": "NONE",
     "record": "NONE",
 }
-
-MODE_ALIASES = {"single": "combined", "category": "by-type", "separate": "separate"}
-REFERENCE_CATEGORIES = {"archive": "operator-profile", "module": "operator-module"}
 
 STORY_CONTENT_TYPES = {
     "mainline": "MAINLINE",
@@ -40,37 +37,38 @@ STORY_CONTENT_TYPES = {
 def _add_repo_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--repo-dir",
-        default=None,
+        default=argparse.SUPPRESS,
         metavar="DIR",
         help="Local path to a cloned ArknightsGamedata or ArknightsGameData repository (offline)",
     )
     p.add_argument(
         "--yostar-dir",
-        default=None,
+        default=argparse.SUPPRESS,
         metavar="DIR",
         help="Optional YoStar repository path for split Kengxxiao clones",
     )
     p.add_argument(
         "--source",
-        default="arknights-assets",
+        default=argparse.SUPPRESS,
         choices=["arknights-assets", "kengxxiao"],
         help="Remote repository preset when --repo-dir is omitted (default: arknights-assets)",
     )
     p.add_argument(
         "--repo-url",
-        default=None,
+        default=argparse.SUPPRESS,
         metavar="URL",
         help="Custom remote raw base URL",
     )
     p.add_argument(
         "--cache-dir",
-        default=None,
+        default=argparse.SUPPRESS,
         metavar="DIR",
         help="Directory for cached story tables and script files",
     )
     p.add_argument(
         "--no-cache",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="Bypass the local cache and re-read source files",
     )
 
@@ -99,7 +97,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         if target_entry_type and v["entryType"] != target_entry_type:
             continue
         if kw and not (
-            kw in v["volumeNumber"].lower()
+            kw in (v["volumeNumber"] or "").lower()
             or kw in v["groupId"].lower()
             or any(kw in t.lower() for t in v["titles"].values())
         ):
@@ -111,7 +109,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     for v in matched[:limit]:
         title = v["titles"].get(args.lang) or v["titles"]["zh"]
         print(
-            f"  {v['volumeNumber']} | {v['groupId']:18s} | {v['categoryTitle']:8s} | "
+            f"  {v['volumeNumber'] or '-':3s} | {v['groupId']:18s} | {v['categoryTitle']:8s} | "
             f"{v['sceneCount']:2d} scenes | {title}"
         )
 
@@ -119,7 +117,7 @@ def cmd_list(args: argparse.Namespace) -> None:
 def cmd_info(args: argparse.Namespace) -> None:
     provider = _make_provider(args)
     vol = provider.resolve_volume(args.volume, active_langs=list(LANGUAGES), use_cache=not args.no_cache)
-    print(f"Volume   : {vol['volumeNumber']} ({vol['groupId']})")
+    print(f"Volume   : {vol['volumeNumber'] or '-'} ({vol['groupId']})")
     print(f"Category : {vol['categoryTitle']} ({vol['entryType']})")
     print("Titles   :")
     for lang in LANGUAGES:
@@ -131,117 +129,6 @@ def cmd_info(args: argparse.Namespace) -> None:
         print(f"  {idx:02d}. {tag}{t}  ({sc['storyTxt']}.txt)")
 
 
-def _resolve_build_targets(
-    provider: ExternalRepoProvider,
-    args: argparse.Namespace,
-    active_langs: List[str],
-) -> List[str]:
-    targets: List[str] = []
-
-    if args.volume:
-        targets.extend(x.strip() for x in args.volume.split(",") if x.strip())
-
-    if args.range or args.category or args.all:
-        vols = provider.list_volumes(active_langs=active_langs, use_cache=not args.no_cache)
-        range_bounds: Optional[tuple[int, int]] = None
-        if args.range:
-            m = re.match(r"^(\d+)\s*-\s*(\d+)$", args.range.strip())
-            if not m:
-                raise SystemExit(f"Invalid --range format {args.range!r}; expected e.g. '001-018'")
-            range_bounds = (int(m.group(1)), int(m.group(2)))
-            if range_bounds[0] < 1 or range_bounds[0] > range_bounds[1]:
-                raise ValueError("--range must be an ascending, positive volume range (e.g. '001-018').")
-
-        target_type = CATEGORY_ARG_MAP.get(args.category.lower()) if args.category else None
-
-        for v in vols:
-            vnum = int(v["volumeNumber"])
-            if range_bounds and not (range_bounds[0] <= vnum <= range_bounds[1]):
-                continue
-            if target_type and v["entryType"] != target_type:
-                continue
-            if not (args.all or range_bounds or target_type):
-                continue
-            targets.append(v["groupId"])
-
-    # Deduplicate preserving order
-    deduped = list(dict.fromkeys(targets))
-    if not deduped:
-        raise SystemExit("No target volumes specified. Pass --volume, --range, --category, or --all.")
-    return deduped
-
-
-def _validate_build_args(args: argparse.Namespace) -> List[str]:
-    """Reject invalid requests before reading sources or starting a long build."""
-    formats = normalize_formats(args.formats.split(","))
-    has_story_selector = bool(args.volume or args.range or args.category)
-    if args.all and has_story_selector:
-        raise ValueError("--all cannot be combined with --volume, --range, or --category.")
-    if args.range:
-        match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", args.range.strip())
-        if not match or int(match[1]) < 1 or int(match[1]) > int(match[2]):
-            raise ValueError("--range must be an ascending, positive volume range (e.g. '001-018').")
-    if args.volume is not None and not any(part.strip() for part in args.volume.split(",")):
-        raise ValueError("--volume requires at least one volume number, groupId, or title.")
-    if has_story_selector and args.content_types and not any(
-        kind in STORY_CONTENT_TYPES for kind in args.content_types
-    ):
-        raise ValueError("--volume/--range/--category require a story content type in --content-types.")
-    if args.output_mode == "separate" and not (has_story_selector or args.all or args.content_types):
-        raise ValueError("No targets specified. Pass --volume, --range, --category, --content-types, or --all.")
-    if args.zip:
-        archive = Path(args.zip)
-        if (
-            archive.is_absolute() or archive.name != args.zip
-            or sanitize_filename(args.zip) != args.zip or archive.suffix.lower() != ".zip"
-        ):
-            raise ValueError("--zip must be a .zip filename inside --out, e.g. 'library.zip'.")
-    return formats
-
-
-def _normalize_build_options(args: argparse.Namespace) -> None:
-    """Accept the reference project's CLI spelling without changing selectors."""
-    args.output_mode = args.output_mode or MODE_ALIASES.get(getattr(args, "mode", None), "separate")
-    if args.category not in REFERENCE_CATEGORIES:
-        return
-    if args.all or args.volume or args.range:
-        raise ValueError("--category archive/module cannot be combined with --all, --volume, or --range.")
-    content_type = REFERENCE_CATEGORIES[args.category]
-    if args.content_types and content_type not in args.content_types:
-        raise ValueError("--category and --content-types select different content types.")
-    args.content_types = [content_type]
-    args.category = None
-
-
-def _select_build_content(
-    provider: ExternalRepoProvider,
-    args: argparse.Namespace,
-    active_langs: List[str],
-) -> Tuple[List[str], Optional[List[Dict[str, Any]]]]:
-    has_story_selector = bool(args.volume or args.range or args.category)
-    wanted = set(args.content_types or (STORY_CONTENT_TYPES if has_story_selector else CONTENT_TYPES))
-    # A consistent category order keeps all three output modes easy to compare.
-    selected_types = [kind for kind in CONTENT_TYPES if kind in wanted]
-    volumes: Optional[List[Dict[str, Any]]] = None
-    if has_story_selector:
-        targets = _resolve_build_targets(provider, args, active_langs)
-        allowed_entries = {STORY_CONTENT_TYPES[kind] for kind in selected_types if kind in STORY_CONTENT_TYPES}
-        resolved: Dict[str, Dict[str, Any]] = {}
-        for target in targets:
-            volume = provider.resolve_volume(target, active_langs=active_langs, use_cache=not args.no_cache)
-            if volume["entryType"] in allowed_entries:
-                resolved.setdefault(volume["groupId"], volume)
-        volumes = list(resolved.values())
-        if not volumes:
-            raise ValueError("No story volumes match the selected volumes and content types.")
-        present = {volume["entryType"] for volume in volumes}
-        selected_types = [
-            kind for kind in selected_types
-            if kind not in STORY_CONTENT_TYPES or STORY_CONTENT_TYPES[kind] in present
-        ]
-    return selected_types, volumes
-
-
 def _edition_stem(title: str, primary_lang: str, secondary_lang: Optional[str]) -> str:
     stem = sanitize_filename(title)
     if secondary_lang:
@@ -250,14 +137,7 @@ def _edition_stem(title: str, primary_lang: str, secondary_lang: Optional[str]) 
 
 
 def cmd_build(args: argparse.Namespace) -> None:
-    metrics = Measurements() if args.timings else None
-    token = CURRENT_MEASUREMENTS.set(metrics)
-    try:
-        _cmd_build(args)
-    finally:
-        CURRENT_MEASUREMENTS.reset(token)
-        if metrics:
-            print(metrics.summary())
+    _cmd_build(args)
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
@@ -271,134 +151,108 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
 
 def _cmd_build(args: argparse.Namespace) -> None:
-    _normalize_build_options(args)
-    formats = _validate_build_args(args)
+    formats = normalize_formats(args.formats.split(","))
     if args.secondary_lang == args.lang:
         args.secondary_lang = None
-    out_dir = Path(args.out).resolve()
+    out_dir = (Path.cwd() / "output").resolve()
     active_langs = [args.lang] + ([args.secondary_lang] if args.secondary_lang else [])
     provider = _make_provider(args)
-    selected_types, selected_volumes = _select_build_content(provider, args, active_langs)
 
     def log_progress(msg: str, pct: int) -> None:
         print(f"[{pct:3d}%] {msg}", flush=True)
 
-    diagnostics = BuildDiagnostics(on_progress=log_progress, skip_missing=args.skip_missing)
+    diagnostics = BuildDiagnostics(on_progress=log_progress)
 
-    def render(titles: Dict[str, str], sections: List[LinearSection], stem: str) -> List[Dict[str, Any]]:
+    def render(titles, sections, stem, directory=out_dir, epub_sections=None):
         return package_sections(
-            volume_titles=titles,
-            sections=sections,
+            volume_titles=titles, sections=sections,
             output_stem=_edition_stem(stem, args.lang, args.secondary_lang),
-            formats=formats,
-            output_dir=out_dir,
-            primary_lang=args.lang,
-            secondary_lang=args.secondary_lang,
-            on_progress=log_progress,
+            formats=formats, output_dir=directory, primary_lang=args.lang,
+            secondary_lang=args.secondary_lang, on_progress=log_progress, epub_sections=epub_sections,
         )
 
     all_built: List[Dict[str, Any]] = []
     combined_sections: List[LinearSection] = []
-    included_types: List[str] = []
-    if args.output_mode == "separate" and any(kind in STORY_CONTENT_TYPES for kind in selected_types):
-        volumes = selected_volumes if selected_volumes is not None else provider.list_volumes(
-            active_langs=active_langs, use_cache=not args.no_cache,
-        )
-        allowed_entries = {STORY_CONTENT_TYPES[kind] for kind in selected_types if kind in STORY_CONTENT_TYPES}
-        volumes = [volume for volume in volumes if volume["entryType"] in allowed_entries]
+    combined_epub_sections: Optional[List[LinearSection]] = [] if "epub" in formats else None
+    if args.output_mode == "separate":
+        volumes = provider.list_volumes(active_langs=active_langs)
         present = {volume["entryType"] for volume in volumes}
-        missing_types = [
-            kind for kind in selected_types
-            if kind in STORY_CONTENT_TYPES and STORY_CONTENT_TYPES[kind] not in present
-        ]
-        for content_type in missing_types:
-            diagnostics.empty_category(content_type, CONTENT_LABELS[content_type].get(args.lang, content_type))
+        for kind, entry in STORY_CONTENT_TYPES.items():
+            if entry not in present:
+                diagnostics.empty_category(kind, CONTENT_LABELS[kind][args.lang])
         for index, volume in enumerate(volumes, start=1):
-            print(f"\n[Vol {index}/{len(volumes)}] {volume['titles'].get(args.lang) or volume['titles']['zh']}", flush=True)
+            print(f"\n[Vol {index}/{len(volumes)}] {volume['titles'][args.lang]}", flush=True)
             all_built.extend(package_volume(
-                provider=provider,
-                volume_identifier=volume["groupId"],
-                formats=formats,
-                output_dir=out_dir,
-                primary_lang=args.lang,
-                secondary_lang=args.secondary_lang,
-                nickname=args.nickname,
-                use_cache=not args.no_cache,
-                on_progress=log_progress,
-                diagnostics=diagnostics,
-                volume=volume,
+                provider=provider, volume_identifier=volume["groupId"], volume=volume,
+                formats=formats, output_dir=out_dir, primary_lang=args.lang,
+                secondary_lang=args.secondary_lang, on_progress=log_progress, diagnostics=diagnostics,
             ))
 
-    for content_type in selected_types:
+    for content_type in CONTENT_TYPES:
         if args.output_mode == "separate" and content_type in STORY_CONTENT_TYPES:
             continue
-        label = CONTENT_LABELS[content_type].get(args.lang, content_type)
+        label = CONTENT_LABELS[content_type][args.lang]
         print(f"\n[{label}] Collecting content...", flush=True)
         titles, sections = collect_type_sections(
-            provider=provider,
-            content_type=content_type,
-            active_langs=active_langs,
-            use_cache=not args.no_cache,
-            custom_nickname=args.nickname,
-            volumes=selected_volumes,
-            on_progress=log_progress,
-            diagnostics=diagnostics,
+            provider=provider, content_type=content_type, active_langs=active_langs,
+            on_progress=log_progress, diagnostics=diagnostics,
         )
         if not any(section.blocks for section in sections):
             diagnostics.empty_category(content_type, label)
-            continue
-        included_types.append(content_type)
         if args.output_mode == "combined":
-            combined_sections.append(LinearSection(
-                scene_id=f"collection_{content_type}",
-                raw_tag="",
-                titles=dict(CONTENT_LABELS[content_type]),
-                blocks=[],
-                heading_level=1,
-                is_divider=True,
-            ))
-            combined_sections.extend(replace(section, heading_level=section.heading_level + 1) for section in sections)
+            divider = LinearSection(
+                scene_id=f"collection_{content_type}", raw_tag="",
+                titles=dict(CONTENT_LABELS[content_type]), blocks=[], heading_level=1, is_divider=True,
+            )
+            category_sections = [divider, *(replace(section, heading_level=section.heading_level + 1)
+                                            for section in sections)]
+            combined_sections.extend(category_sections)
+            if combined_epub_sections is not None:
+                if content_type in {"operator-record", "operator-module"}:
+                    grouped = group_operator_entries(content_type, sections)
+                    combined_epub_sections.append(divider)
+                    combined_epub_sections.extend(replace(section, heading_level=section.heading_level + 1)
+                                                  for section in grouped)
+                else:
+                    combined_epub_sections.extend(category_sections)
         elif args.output_mode == "by-type":
-            all_built.extend(render(titles, sections, titles.get(args.lang) or titles["zh"]))
+            all_built.extend(render(titles, sections, titles[args.lang]))
         else:
-            # Each archive/module section is one independently readable entry.
             prefix = "profile" if content_type == "operator-profile" else "module"
             for section in sections:
                 if not section.blocks:
                     continue
-                title = section.titles.get(args.lang) or section.titles.get("zh") or section.scene_id
+                title = section.titles.get(args.lang) or section.titles["zh"]
                 stem = f"{prefix}-{title}-{section.scene_id[-12:]}"
-                all_built.extend(render(section.titles, [replace(section, heading_level=1)], stem))
+                all_built.extend(render(section.titles, [replace(section, heading_level=1)], stem,
+                                        out_dir / content_type))
 
-    if args.output_mode == "combined" and combined_sections:
-        key = "all" if (
-            set(included_types) == set(CONTENT_TYPES) and selected_volumes is None and not diagnostics.has_omissions
-        ) else "selected"
-        titles = COLLECTION_TITLES[key]
-        all_built.extend(render(titles, combined_sections, titles.get(args.lang) or titles["zh"]))
-
+    if args.output_mode == "combined":
+        titles = COLLECTION_TITLES["all"]
+        all_built.extend(render(titles, combined_sections, titles[args.lang], epub_sections=combined_epub_sections))
     if diagnostics.summary():
         print(f"\n{diagnostics.summary()}", flush=True)
     if not all_built:
-        raise ValueError("No content found for the selected content types; no files generated.")
-    if args.zip:
-        archive = create_zip_bundle(all_built, out_dir / args.zip)
-        print(f"\nBundled ZIP archive: {archive} ({archive.stat().st_size:,} bytes)")
+        raise ValueError("No readable content found; no files generated.")
     print(f"\nDone! Generated {len(all_built)} file(s) in {out_dir}:")
     for item in all_built:
-        print(f"  - {item['fileName']} ({item['size']:,} bytes | sha256={item['sha256'][:12]}...)")
+        print(f"  - {Path(item['path']).relative_to(out_dir)} ({item['size']:,} bytes)")
 
 
-def main() -> None:
+def main(argv: Optional[List[str]] = None) -> None:
+    common = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    _add_repo_args(common)
+    add_download_args(common)
     parser = argparse.ArgumentParser(
         prog="terra-packager",
+        allow_abbrev=False,
         description="Build offline EPUB, PDF, and TXT reading packages from Arknights game data.",
         epilog=(
             "Examples:\n"
             "  python launch.py list --category mainline\n"
             "  python launch.py info main_0 --lang en\n"
-            "  python launch.py build -v main_0 -l zh -f epub,txt -o output\n"
-            "  python launch.py build --all -l zh -f pdf,epub,txt -o output"
+            "  python launch.py build -l zh -f epub,txt --output-mode combined\n"
+            "  python launch.py build -l zh -f pdf,epub,txt --output-mode separate"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -412,11 +266,12 @@ def main() -> None:
     # 1. list
     p_list = sub.add_parser(
         "list",
+        parents=[common],
+        allow_abbrev=False,
         help="List story volumes",
         description="List and search story volumes from a local or remote game data repository.",
         epilog="Example: python launch.py list --category mainline --search Babel",
     )
-    _add_repo_args(p_list)
     p_list.add_argument(
         "--lang",
         default="zh",
@@ -447,11 +302,12 @@ def main() -> None:
     # 2. info
     p_info = sub.add_parser(
         "info",
+        parents=[common],
+        allow_abbrev=False,
         help="Inspect one story volume",
         description="Show multilingual titles and the raw .txt scene list for one volume.",
         epilog="Example: python launch.py info main_0 --lang en",
     )
-    _add_repo_args(p_info)
     p_info.add_argument(
         "volume",
         metavar="VOLUME",
@@ -465,125 +321,48 @@ def main() -> None:
     )
     p_info.set_defaults(func=cmd_info)
 
-    # 3. build
+    # Build exposes only publication format, language, and grouping.
     p_build = sub.add_parser(
-        "build",
-        help="Build EPUB, PDF, and TXT packages",
-        description="Compile selected game data into offline EPUB, PDF, and/or TXT packages.",
-        epilog=(
-            "Examples:\n"
-            "  python launch.py build -v main_0 -l zh -f pdf,epub,txt -o output\n"
-            "  python launch.py build --repo-dir data/gamedata --category mainline -l en -f epub -o output\n"
-            "  python launch.py build --all --output-mode combined -l zh -f txt -o output"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    _add_repo_args(p_build)
-    p_build.add_argument(
-        "--volume",
-        "-v",
-        default=None,
-        metavar="VOLUME[,VOLUME...]",
-        help="Volume number, groupId, or title; separate multiple values with commas",
+        "build", allow_abbrev=False,
+        help="Build all six content types",
+        description="Build all content into ./output; local data is detected automatically.",
+        epilog="Example: python launch.py build -f epub -l zh --output-mode combined",
     )
     p_build.add_argument(
-        "--range",
-        default=None,
-        metavar="START-END",
-        help="Build an inclusive volume number range (e.g. '001-018')",
+        "--formats", "-f", default="pdf,epub,txt", metavar="FORMAT[,FORMAT...]",
+        help="Comma-separated pdf, epub, txt (default: all three)",
     )
+    p_build.add_argument("--lang", "-l", default="zh", choices=LANGUAGES, help="Primary language (default: zh)")
+    p_build.add_argument("--secondary-lang", "-s", default=None, choices=LANGUAGES, help="Optional bilingual language")
     p_build.add_argument(
-        "--category",
-        default=None,
-        choices=["mainline", "sidestory", "ministory", "operator", "record", "archive", "module"],
-        help="Select a category: mainline, sidestory, ministory, operator, record, archive, or module",
-    )
-    p_build.add_argument(
-        "--all",
-        action="store_true",
-        help="Build all six content types, or the subset given by --content-types",
-    )
-    mode_group = p_build.add_mutually_exclusive_group()
-    mode_group.add_argument(
-        "--output-mode",
-        choices=["separate", "by-type", "combined"],
-        default=None,
-        help="Output separately, by content type, or as one combined publication (default: separate)",
-    )
-    mode_group.add_argument(
-        "--mode",
-        choices=list(MODE_ALIASES),
-        default=None,
-        help="Compatibility aliases: single=combined, category=by-type, separate=separate",
-    )
-    p_build.add_argument(
-        "--skip-missing",
-        action="store_true",
-        help="Skip missing scripts and empty content types, with warnings and a summary",
-    )
-    p_build.add_argument(
-        "--content-types",
-        nargs="+",
-        choices=CONTENT_TYPES,
-        default=None,
-        metavar="TYPE",
-        help="Content types: " + ", ".join(CONTENT_TYPES) + " (aggregate modes default to all six)",
-    )
-    p_build.add_argument(
-        "--formats",
-        "-f",
-        default="pdf,epub,txt",
-        metavar="FORMAT[,FORMAT...]",
-        help="Comma-separated output formats: pdf, epub, txt (default: all three)",
-    )
-    p_build.add_argument(
-        "--lang",
-        "-l",
-        default="zh",
-        choices=LANGUAGES,
-        help="Primary language: zh, tw, en, ja, ko (default: zh)",
-    )
-    p_build.add_argument(
-        "--secondary-lang",
-        "-s",
-        default=None,
-        choices=LANGUAGES,
-        help="Optional secondary language for a bilingual parallel edition",
-    )
-    p_build.add_argument(
-        "--nickname",
-        default=None,
-        metavar="NAME",
-        help="Override the Doctor's displayed nickname",
-    )
-    p_build.add_argument(
-        "--out",
-        "-o",
-        default="output",
-        metavar="DIR",
-        help="Output directory (default: ./output)",
-    )
-    p_build.add_argument(
-        "--zip",
-        default=None,
-        metavar="FILE.zip",
-        help="Optional ZIP filename to create inside --out",
+        "--output-mode", choices=["combined", "by-type", "separate"], default="separate",
+        help="combined: one book; by-type: six books; separate: per volume/entry (default)",
     )
     p_build.set_defaults(func=cmd_build)
 
-    p_build.add_argument("--jobs", type=int, choices=range(1, 9), default=4, metavar="N", help="Concurrent remote downloads (1-8, default: 4)")
-    p_build.add_argument("--timings", action="store_true", help="Report stage timings and cache counters")
-
-    p_doctor = sub.add_parser("doctor", help="Check the environment without downloading or creating files")
-    _add_repo_args(p_doctor)
+    p_doctor = sub.add_parser(
+        "doctor", parents=[common], allow_abbrev=False,
+        help="Check the environment without downloading or creating files",
+    )
     p_doctor.add_argument("--lang", "-l", choices=LANGUAGES, default="zh")
     p_doctor.add_argument("--secondary-lang", "-s", choices=LANGUAGES)
     p_doctor.add_argument("--formats", "-f", default="pdf,epub,txt")
     p_doctor.add_argument("--out", "-o", default="output")
     p_doctor.set_defaults(func=cmd_doctor)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    explicit_source = any(hasattr(args, name) for name in ("repo_dir", "source", "repo_url"))
+    defaults = {
+        "repo_dir": None, "yostar_dir": None, "source": "arknights-assets", "repo_url": None,
+        "cache_dir": None, "no_cache": False, "download": False, "data_dir": None, "repository": None,
+    }
+    for name, value in defaults.items():
+        vars(args).setdefault(name, value)
     try:
+        # Validate the format request before reading local or remote data.
+        if args.command == "build":
+            normalize_formats(args.formats.split(","))
+        prepare_data_source(args, explicit_source)
         args.func(args)
     except (ValueError, KeyError, FileNotFoundError) as exc:
         parser.exit(2, f"terra-packager: error: {exc}\n")

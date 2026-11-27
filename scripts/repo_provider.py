@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import http.client
 import os
 import re
 import hashlib
@@ -47,6 +48,10 @@ CATEGORY_LABELS: Dict[str, str] = {
     "NONE": "干员密录",
 }
 
+CONTENT_ENTRY_TYPES = {
+    "mainline": "MAINLINE", "sidestory": "ACTIVITY", "ministory": "MINI_ACTIVITY", "operator-record": "NONE",
+}
+
 
 class ExternalRepoProvider:
     """
@@ -69,11 +74,11 @@ class ExternalRepoProvider:
         measurements=None,
     ) -> None:
         self.source = source
-        self.repo_dir = Path(repo_dir).resolve() if repo_dir else None
-        self.yostar_dir = Path(yostar_dir).resolve() if yostar_dir else None
+        self.repo_dir = Path(repo_dir).expanduser().resolve() if repo_dir else None
+        self.yostar_dir = Path(yostar_dir).expanduser().resolve() if yostar_dir else None
         self.repo_url = repo_url.rstrip("/") if repo_url else DEFAULT_ARKNIGHTS_ASSETS_BASE
         self.cache_dir = (
-            Path(cache_dir).resolve()
+            Path(cache_dir).expanduser().resolve()
             if cache_dir
             else cache_root()
         )
@@ -203,7 +208,7 @@ class ExternalRepoProvider:
                             except (ValueError, TypeError):
                                 pass
                     time.sleep(min(30, max(0, delay)))
-                except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError, OSError) as exc:
                     if attempt == 2:
                         errors.append(f"{url}: {exc}")
                     else:
@@ -244,6 +249,45 @@ class ExternalRepoProvider:
         self._review_tables[lang] = parsed
         return parsed
 
+    def get_character_names(self, active_langs, use_cache=True) -> Dict[str, Dict[str, str]]:
+        langs = tuple(sorted(set(["zh", *active_langs])))
+        if langs not in self._character_names_cache:
+            names: Dict[str, Dict[str, str]] = {}
+            for lang in langs:
+                table = self.get_json_table(lang, "excel/character_table.json", use_cache)
+                chars = table.get("chars", table)
+                if not isinstance(chars, dict):
+                    raise ValueError("Expected an object in character_table.json")
+                for char_id, character in chars.items():
+                    if not isinstance(character, dict):
+                        continue
+                    name = next((character.get(field) for field in ("name", "charName", "appellation")
+                                 if isinstance(character.get(field), str) and character[field].strip()), "")
+                    if name:
+                        names.setdefault(str(char_id), {})[lang] = name.strip()
+            self._character_names_cache[langs] = names
+        return self._character_names_cache[langs]
+
+    def _record_owners(self, langs, use_cache):
+        owners = {}
+        for lang in langs:
+            table = self.get_json_table(lang, "excel/handbook_info_table.json", use_cache)
+            records = table.get("handbookDict", table)
+            if not isinstance(records, dict):
+                raise ValueError("Expected handbookDict to be an object")
+            for char_id, record in records.items():
+                if not isinstance(record, dict):
+                    continue
+                for avg in record.get("handbookAvgList") or []:
+                    if not isinstance(avg, dict) or not avg.get("storySetId"):
+                        continue
+                    gid = avg["storySetId"]
+                    owner = avg.get("charId") or record.get("charID") or char_id
+                    if gid in owners and owners[gid] != owner:
+                        raise ValueError(f"Conflicting operator owners for {gid}")
+                    owners[gid] = owner
+        return owners
+
     @staticmethod
     def _volume_sort_key(gid: str, group_obj: Dict[str, Any]) -> Tuple[int, int, str]:
         entry_type = group_obj.get("entryType") or "NONE"
@@ -272,12 +316,14 @@ class ExternalRepoProvider:
         with measured("catalog"):
             volumes = self._build_catalog(langs_to_load, use_cache)
         self._catalogs[key] = volumes
-        index = {}
+        index: Dict[str, List[Dict[str, Any]]] = {}
         for volume in volumes:
-            aliases = [volume["volumeNumber"], volume["groupId"],
-                       f"{volume['volumeNumber']}-{volume['titles']['zh']}", *volume["titles"].values()]
-            for alias in aliases:
-                index.setdefault(alias, volume)
+            aliases = [volume["groupId"], *volume["titles"].values()]
+            if volume["volumeNumber"] is not None:
+                aliases.extend([volume["volumeNumber"], str(int(volume["volumeNumber"])),
+                                f"{volume['volumeNumber']}-{volume['titles']['zh']}"])
+            for alias in set(aliases):
+                index.setdefault(alias, []).append(volume)
         self._volume_indexes[key] = index
         if self.measurements:
             self.measurements.count("catalog_builds")
@@ -296,7 +342,12 @@ class ExternalRepoProvider:
         )
 
         volumes: List[Dict[str, Any]] = []
-        vol_idx = 0
+        counters = {"MAINLINE": 0, "ACTIVITY": 1, "MINI_ACTIVITY": 1}
+        has_records = any((group.get("entryType") or "NONE") == "NONE" and
+                          any(u.get("storyTxt") for u in group.get("infoUnlockDatas") or [])
+                          for group in cn_table.values())
+        owners = self._record_owners(langs_to_load, use_cache) if has_records else {}
+        names = self.get_character_names(langs_to_load, use_cache) if has_records else {}
         for gid in sorted_gids:
             g_cn = cn_table[gid]
             unlocks_cn = [
@@ -306,9 +357,13 @@ class ExternalRepoProvider:
             if not unlocks_cn:
                 continue
 
-            vol_idx += 1
-            vol_num = f"{vol_idx:03d}"
             entry_type = g_cn.get("entryType") or "NONE"
+            vol_num = None
+            if entry_type in counters:
+                chapter = re.fullmatch(r"main_(\d+)", gid) if entry_type == "MAINLINE" else None
+                number = int(chapter[1]) if chapter else counters[entry_type]
+                vol_num = f"{number:03d}"
+                counters[entry_type] = number + 1
 
             titles: Dict[str, str] = {}
             for lang in LANGUAGES:
@@ -317,6 +372,17 @@ class ExternalRepoProvider:
                     titles[lang] = tbl[gid]["name"]
                 else:
                     titles[lang] = g_cn.get("name") or gid
+
+            operator_id = owners.get(gid) if entry_type == "NONE" else None
+            operator_names: Dict[str, str] = {}
+            entry_titles = titles
+            if entry_type == "NONE":
+                localized_names = names.get(operator_id, {})
+                fallback_name = localized_names.get("zh") or next(iter(localized_names.values()), "")
+                if not operator_id or not fallback_name:
+                    raise ValueError(f"Cannot resolve the operator name for record {gid}")
+                operator_names = {lang: localized_names.get(lang) or fallback_name for lang in LANGUAGES}
+                titles = {lang: f"{operator_names[lang]} · {title}" for lang, title in entry_titles.items()}
 
             scenes_meta: List[Dict[str, Any]] = []
             for seq_idx, u_cn in enumerate(unlocks_cn):
@@ -353,6 +419,9 @@ class ExternalRepoProvider:
                 "titles": titles,
                 "sceneCount": len(scenes_meta),
                 "scenesMeta": scenes_meta,
+                "operatorId": operator_id,
+                "operatorNames": operator_names,
+                "entryTitles": entry_titles,
             })
         return volumes
 
@@ -365,8 +434,12 @@ class ExternalRepoProvider:
         vols = self.list_volumes(active_langs=active_langs, use_cache=use_cache)
         q = identifier.strip()
         key = tuple(sorted(set(["zh", *(active_langs or [])])))
-        if q in self._volume_indexes[key]:
-            return self._volume_indexes[key][q]
+        matches = self._volume_indexes[key].get(q, [])
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            candidates = ", ".join(f"{v['groupId']} ({v['categoryTitle']}: {v['titles']['zh']})" for v in matches)
+            raise ValueError(f"Ambiguous volume {identifier!r}; use a groupId: {candidates}")
         # Fuzzy substring match fallback
         q_low = q.lower()
         for v in vols:

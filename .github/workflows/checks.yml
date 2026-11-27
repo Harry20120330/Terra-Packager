@@ -23,6 +23,8 @@ jobs:
           python -m pip install dist/*.whl
           terra-packager --help
           terra-packager build --help
+          terra-packager list --download --help
+          python launch.py list --download --help
           terra-packager doctor -f txt --cache-dir tmp/cache -o tmp/output
       - uses: actions/upload-artifact@v4
         with:

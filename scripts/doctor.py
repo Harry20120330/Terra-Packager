@@ -18,10 +18,14 @@ def _writable_ancestor(path):
 
 def check_environment(provider, languages, formats, output):
     checks = []
+    for label, value in (("Output directory", output), ("Cache directory", provider.cache_dir)):
+        path = Path(value).expanduser().resolve()
+        if path.exists() and not path.is_dir():
+            checks.append((label, False, f"Not a directory: {path}"))
+        else:
+            checks.append((label, _writable_ancestor(path), str(path)))
     def add(label, ok, detail=""):
         checks.append((label, bool(ok), str(detail)))
-    add("Output directory", _writable_ancestor(output), output)
-    add("Cache directory", _writable_ancestor(provider.cache_dir), provider.cache_dir)
     if provider.repo_dir:
         for lang in languages:
             root = provider._local_gamedata_root(lang)

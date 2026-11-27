@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .dag_linearizer import LinearSection
-from .i18n import TYPST_LANG_CONFIG, UI_STRINGS, get_edition_badge, localize_stage_tag
+from .i18n import TYPST_LANG_CONFIG, UI_STRINGS, format_utterance_line, get_edition_badge, localize_stage_tag
 from .runtime import atomic_write, cache_root, measured
 
 PUBLISHER_DIR = Path(__file__).resolve().parent
@@ -38,6 +38,12 @@ def ensure_typst_binary(download: bool = True) -> Path:
 
     sys_name = platform.system().lower()
     arch = platform.machine().lower()
+    if arch not in ("x86_64", "amd64", "aarch64", "arm64") or (
+        sys_name == "windows" and arch not in ("x86_64", "amd64")
+    ):
+        raise RuntimeError(
+            f"Unsupported platform for auto-downloading Typst: {sys_name}/{arch}; set TERRA_TYPST_BIN."
+        )
     if sys_name == "linux":
         target = "aarch64-unknown-linux-musl" if arch in ("aarch64", "arm64") else "x86_64-unknown-linux-musl"
         ext = "tar.xz"
@@ -116,11 +122,13 @@ def build_typst_payload(
                 txt_s = blk.texts.get(s_lang) or "" if bilingual else ""
                 if not txt_p and not txt_s:
                     continue
+                if txt_p:
+                    txt_p = format_utterance_line(blk.speakers.get(primary_lang) or "", txt_p, primary_lang)
+                if txt_s:
+                    txt_s = format_utterance_line(blk.speakers.get(s_lang) or "", txt_s, s_lang)
                 out_blocks.append({
                     "kind": "utterance",
                     "depth": blk.depth,
-                    "spk_p": blk.speakers.get(primary_lang) or "",
-                    "spk_s": blk.speakers.get(s_lang) or "" if bilingual else "",
                     "txt_p": txt_p,
                     "txt_s": txt_s,
                 })

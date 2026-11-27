@@ -28,6 +28,12 @@ NOTO_REGULAR_TTC = _DEFAULT_FONT_DIR / "NotoSerifCJK-Regular.ttc"
 NOTO_BOLD_TTC = _DEFAULT_FONT_DIR / "NotoSerifCJK-Bold.ttc"
 
 WORD_JOINER = "\u2060"
+COVER_CSS = """@page { margin: 0; }
+html, body { margin: 0; padding: 0; height: 100%; }
+.cover { margin: 0; padding: 0; text-align: center; page-break-inside: avoid; }
+.cover-image { display: block; margin: 0 auto; width: auto; height: auto;
+               max-width: 100%; max-height: 100vh; }
+"""
 
 
 def _esc(text: str) -> str:
@@ -52,16 +58,31 @@ def _content_anchor(preferred: str, used: Set[str]) -> str:
     return candidate
 
 
+def _utterance_html(spk: str, txt: str, lang: str) -> str:
+    if spk:
+        colon = UI_STRINGS.get(lang, UI_STRINGS["zh"])["colon"]
+        joiner = WORD_JOINER if colon == "：" else ""
+        return f"{_esc(spk)}{colon}{joiner}{_text_html(txt)}"
+    return _text_html(txt)
+
+
 def _render_language_block(spk: str, txt: str, lang: str, is_translation: bool = False) -> str:
     epub_lang = EPUB_LANG_TAGS.get(lang, "zh-Hans")
     cls = "language-block translation" if is_translation else "language-block"
-    colon = UI_STRINGS.get(lang, UI_STRINGS["zh"])["colon"]
-    if spk:
-        sep = f"{colon}{WORD_JOINER}" if colon == "：" else colon
-        inner = f'<span class="speaker-name">{_esc(spk)}</span>{sep}<span class="source-text">{_text_html(txt)}</span>'
-    else:
-        inner = f'<span class="source-text">{_text_html(txt)}</span>'
+    inner = _utterance_html(spk, txt, lang)
     return f'<div class="{cls}" lang="{epub_lang}"><p class="utterance prose-paragraph">{inner}</p></div>'
+
+
+def _render_monolingual_exchange(spk: str, txt: str, lang: str, cls: str, anchor: str) -> str:
+    """Keep large single-language collections below boko's four-digit aid limit.
+
+    One prose container replaces the exchange, language and paragraph wrappers.
+    Explicit line breaks, the block anchor and branch depth remain on it.
+    """
+    epub_lang = EPUB_LANG_TAGS.get(lang, "zh-Hans")
+    inner = _utterance_html(spk, txt, lang)
+    return (f'<div class="{cls} language-block compact-prose" id="{_esc(anchor)}" '
+            f'lang="{epub_lang}">{inner}</div>')
 
 
 def render_book_xhtml(
@@ -108,6 +129,12 @@ def render_book_xhtml(
             if blk.kind == "utterance":
                 p_txt = blk.texts.get(primary_lang) or ""
                 p_spk = blk.speakers.get(primary_lang) or ""
+                ex_cls = f"exchange depth-{blk.depth}" if blk.depth > 0 else "exchange"
+                if not bilingual:
+                    if p_txt:
+                        anchor = _content_anchor(blk.line_id or f"{sec.scene_id}_block_{block_index}", used_ids)
+                        parts.append(_render_monolingual_exchange(p_spk, p_txt, primary_lang, ex_cls, anchor))
+                    continue
                 lang_divs: List[str] = []
                 if p_txt:
                     lang_divs.append(_render_language_block(p_spk, p_txt, primary_lang, is_translation=False))
@@ -118,7 +145,6 @@ def render_book_xhtml(
                         lang_divs.append(_render_language_block(s_spk, s_txt, secondary_lang, is_translation=bool(p_txt)))
                 if not lang_divs:
                     continue
-                ex_cls = f"exchange depth-{blk.depth}" if blk.depth > 0 else "exchange"
                 anchor = _content_anchor(blk.line_id or f"{sec.scene_id}_block_{block_index}", used_ids)
                 parts.append(f'<div class="{ex_cls}" id="{anchor}">{"".join(lang_divs)}</div>')
 
@@ -127,15 +153,18 @@ def render_book_xhtml(
                 for option_index, opt in enumerate(blk.options, start=1):
                     opt_divs: List[str] = []
                     p_opt = opt["texts"].get(primary_lang) or ""
+                    anchor = _content_anchor(
+                        opt.get("id") or f"{sec.scene_id}_block_{block_index}_option_{option_index}", used_ids
+                    )
+                    if not bilingual:
+                        li_items.append(f'<li>{_render_monolingual_exchange("", p_opt, primary_lang, "exchange", anchor)}</li>')
+                        continue
                     if p_opt:
                         opt_divs.append(_render_language_block("", p_opt, primary_lang, is_translation=False))
                     if bilingual and secondary_lang:
                         s_opt = opt["texts"].get(secondary_lang) or ""
                         if s_opt:
                             opt_divs.append(_render_language_block("", s_opt, secondary_lang, is_translation=bool(p_opt)))
-                    anchor = _content_anchor(
-                        opt.get("id") or f"{sec.scene_id}_block_{block_index}_option_{option_index}", used_ids
-                    )
                     li_items.append(f'<li><div class="exchange" id="{anchor}">{"".join(opt_divs)}</div></li>')
                 parts.append(f'<ol class="choices">{"".join(li_items)}</ol>')
 
@@ -168,6 +197,8 @@ def _navigation_nodes(
         if not sec.scene_id or sec.scene_id in ids:
             raise ValueError("EPUB section IDs must be nonempty and unique.")
         ids.add(sec.scene_id)
+        if not sec.include_in_toc:
+            continue
         p_tag = localize_stage_tag(sec.raw_tag, primary_lang)
         p_title = sec.titles.get(primary_lang) or sec.titles.get("zh") or sec.scene_id
         # Match arena/001-黑暗时代·上.epub nav.xhtml: Interlude ('幕间') omits prefix in nav TOC
@@ -184,6 +215,7 @@ def _navigation_nodes(
             "level": max(1, min(sec.heading_level, 6)),
             "label": label,
             "href": f"{filename}#{sec.scene_id}",
+            "is_collection": sec.is_divider and sec.scene_id.startswith("collection_"),
             "children": [],
         }
         while stack and stack[-1]["level"] >= node["level"]:
@@ -194,6 +226,14 @@ def _navigation_nodes(
             roots.append(node)
         stack.append(node)
     return roots
+
+
+def _overview_categories(roots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [node for node in roots if node["is_collection"] and node["children"]]
+
+
+def _contents_link(label: str) -> Dict[str, Any]:
+    return {"href": "nav.xhtml#toc", "label": label, "children": []}
 
 
 def render_nav_xhtml(
@@ -208,23 +248,42 @@ def render_nav_xhtml(
     first_id = sections[0].scene_id if sections else ""
     roots = _navigation_nodes(doc_title, sections, primary_lang, secondary_lang, section_hrefs)
 
-    def render_list(nodes: List[Dict[str, Any]]) -> str:
+    def render_link(node: Dict[str, Any]) -> str:
+        return f'<a href="{_esc(node["href"])}">{_esc(node["label"])}</a>'
+
+    def render_list(nodes: List[Dict[str, Any]], depth: int = 1) -> str:
         items = []
         for node in nodes:
-            children = render_list(node["children"]) if node["children"] else ""
-            items.append(f'<li><a href="{_esc(node["href"])}">{_esc(node["label"])}</a>{children}</li>')
-        return f'<ol>{"".join(items)}</ol>'
+            children = render_list(node["children"], depth + 1) if node["children"] else ""
+            items.append(f'<li>{render_link(node)}{children}</li>')
+        return f'<ol class="toc-level-{depth}">{"".join(items)}</ol>'
 
     first_file = (section_hrefs or {}).get(first_id, "book.xhtml")
+    title = f'<h1 id="toc">{_esc(ui["toc_heading"])}</h1>'
+    categories = _overview_categories(roots)
+    overview = ""
+    if categories:
+        links = "".join(f'<li>{render_link(node)}</li>' for node in categories)
+        details = _esc(ui["toc_details"])
+        overview = (
+            f'{title}<section class="quick-index" aria-labelledby="toc-overview">'
+            f'<h2 id="toc-overview">{_esc(ui["toc_overview"])}</h2><ul>{links}</ul>'
+            f'<p><a href="#toc-details">{details}</a></p></section>'
+        )
+        title = f'<h2 id="toc-details">{details}</h2>'
+    else:
+        roots.insert(0, _contents_link(ui["toc_heading"]))
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{p_epub_lang}">'
-        f"<head><title>{_esc(doc_title)}</title>"
+        f"<head><title>{_esc(ui['toc_heading'])}</title>"
         '<link rel="stylesheet" type="text/css" href="style.css"/></head>'
-        f'<body><nav epub:type="toc"><h1>{_esc(ui["toc_heading"])}</h1>{render_list(roots)}</nav>'
+        f'<body>{overview}<nav epub:type="toc">{title}'
+        f'{render_list(roots)}</nav>'
         '<nav epub:type="landmarks" hidden="hidden"><ol>'
         f'<li><a epub:type="cover" href="cover.xhtml">{_esc(ui["cover_landmark"])}</a></li>'
+        f'<li><a epub:type="toc" href="nav.xhtml#toc">{_esc(ui["toc_heading"])}</a></li>'
         f'<li><a epub:type="bodymatter" href="{_esc(first_file)}#{_esc(first_id)}">{_esc(ui["story_heading"])}</a></li>'
         "</ol></nav></body></html>"
     )
@@ -240,15 +299,20 @@ def render_ncx(
 ) -> str:
     """EPUB 2-compatible navigation for readers that ignore EPUB 3 nav.xhtml."""
     roots = _navigation_nodes(doc_title, sections, primary_lang, secondary_lang, section_hrefs)
+    ui = UI_STRINGS.get(primary_lang, UI_STRINGS["zh"])
+    if not _overview_categories(roots):
+        roots.insert(0, _contents_link(ui["toc_heading"]))
     play_order = 0
+    max_depth = 1
 
-    def render_points(nodes: List[Dict[str, Any]]) -> str:
-        nonlocal play_order
+    def render_points(nodes: List[Dict[str, Any]], depth: int = 1) -> str:
+        nonlocal play_order, max_depth
+        max_depth = max(max_depth, depth)
         points: List[str] = []
         for node in nodes:
             play_order += 1
             current_order = play_order
-            children = render_points(node["children"]) if node["children"] else ""
+            children = render_points(node["children"], depth + 1) if node["children"] else ""
             points.append(
                 f'<navPoint id="navPoint-{current_order}" playOrder="{current_order}">'
                 f'<navLabel><text>{_esc(node["label"])}</text></navLabel>'
@@ -256,29 +320,28 @@ def render_ncx(
             )
         return "".join(points)
 
+    nav_points = render_points(roots)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">'
         f'<head><meta name="dtb:uid" content="{_esc(uid)}"/>'
-        '<meta name="dtb:depth" content="3"/>'
+        f'<meta name="dtb:depth" content="{max_depth}"/>'
         '<meta name="dtb:totalPageCount" content="0"/>'
         '<meta name="dtb:maxPageNumber" content="0"/></head>'
         f'<docTitle><text>{_esc(doc_title)}</text></docTitle>'
-        f'<navMap>{render_points(roots)}</navMap></ncx>'
+        f'<navMap>{nav_points}</navMap></ncx>'
     )
 
 
-def render_cover_xhtml(doc_title: str, first_scene_id: str, primary_lang: str = "zh") -> str:
-    ui = UI_STRINGS.get(primary_lang, UI_STRINGS["zh"])
+def render_cover_xhtml(doc_title: str, primary_lang: str = "zh") -> str:
+    epub_lang = EPUB_LANG_TAGS.get(primary_lang, "zh-Hans")
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
-        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+        f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{epub_lang}">'
         f"<head><title>{_esc(doc_title)}</title>"
-        '<link rel="stylesheet" type="text/css" href="style.css"/></head>'
-        '<body><section epub:type="cover" class="cover">'
+        '<link rel="stylesheet" type="text/css" href="cover.css"/></head>'
+        '<body><section epub:type="cover" class="cover" id="cover">'
         f'<img class="cover-image" src="cover.png" alt="{_esc(doc_title)}"/>'
-        f'<p class="book-navigation"><a href="book.xhtml#{_esc(first_scene_id)}">{_esc(ui["cover_nav_start"])}</a>'
-        f' · <a href="nav.xhtml">{_esc(ui["cover_nav_toc"])}</a></p>'
         "</section></body></html>"
     )
 
@@ -482,7 +545,9 @@ def write_epub(
     if any(not value for value in scene_ids) or len(set(scene_ids)) != len(scene_ids):
         raise ValueError("EPUB section IDs must be nonempty and unique.")
     first_scene_id = sections[0].scene_id
-    cover_xhtml = render_cover_xhtml(doc_title, first_scene_id, primary_lang=primary_lang)
+    cover_xhtml = render_cover_xhtml(doc_title, primary_lang=primary_lang)
+    if not cover_png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("EPUB requires a nonempty PNG cover image.")
 
     with tempfile.TemporaryDirectory(prefix="terra_epub_") as tmpdir:
         tmp = Path(tmpdir)
@@ -493,6 +558,7 @@ def write_epub(
         section_hrefs: Dict[str, str] = {}
         documents: List[Tuple[str, str]] = []
         content_hash = hashlib.sha256()
+        content_hash.update(cover_xhtml.encode("utf-8") + cover_png_bytes)
         for index, group in enumerate(_section_documents(sections), start=1):
             item_id = "book" if index == 1 else f"section-{index:06d}"
             filename = f"{item_id}.xhtml"
@@ -557,22 +623,29 @@ def write_epub(
             "<dc:creator>泰拉文库 / Terra Library</dc:creator>"
             f"<dc:rights>{_esc(ui['opf_rights'])}</dc:rights>"
             f'<meta property="dcterms:modified">{modified}</meta>'
+            '<meta name="cover" content="cover-image"/>'
             "</metadata>"
             "<manifest>"
-            f"{document_items_xml}"
+            '<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>'
             '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+            f"{document_items_xml}"
             '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
             '<item id="css" href="style.css" media-type="text/css"/>'
-            '<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>'
+            '<item id="cover-css" href="cover.css" media-type="text/css"/>'
             '<item id="cover-image" href="cover.png" media-type="image/png" properties="cover-image"/>'
             f"{font_items_xml}"
             f"{lic_items_xml}"
             "</manifest>"
             '<spine toc="ncx">'
             '<itemref idref="cover"/>'
+            '<itemref idref="nav"/>'
             f"{document_spine_xml}"
-            '<itemref idref="nav" linear="no"/>'
             "</spine>"
+            '<guide>'
+            f'<reference type="cover" title="{_esc(ui["cover_landmark"])}" href="cover.xhtml"/>'
+            f'<reference type="toc" title="{_esc(ui["toc_heading"])}" href="nav.xhtml#toc"/>'
+            f'<reference type="text" title="{_esc(ui["story_heading"])}" href="{_esc(section_hrefs[first_scene_id])}#{_esc(first_scene_id)}"/>'
+            '</guide>'
             "</package>"
         )
 
@@ -594,13 +667,14 @@ def write_epub(
 
             zf.writestr("META-INF/container.xml", container_xml.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
             zf.writestr("OEBPS/package.opf", package_opf.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("OEBPS/cover.xhtml", cover_xhtml.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("OEBPS/nav.xhtml", nav_xhtml.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
             for _, filename in documents:
                 zf.write(oebps / filename, f"OEBPS/{filename}", compress_type=zipfile.ZIP_DEFLATED)
-            zf.writestr("OEBPS/nav.xhtml", nav_xhtml.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
             zf.writestr("OEBPS/toc.ncx", toc_ncx.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
             zf.writestr("OEBPS/style.css", css_text.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
             zf.writestr("OEBPS/cover.png", cover_png_bytes, compress_type=zipfile.ZIP_DEFLATED)
-            zf.writestr("OEBPS/cover.xhtml", cover_xhtml.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("OEBPS/cover.css", COVER_CSS.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
 
             for _, rel_href in manifest_fonts:
                 zf.write(oebps / rel_href, f"OEBPS/{rel_href}", compress_type=zipfile.ZIP_DEFLATED)

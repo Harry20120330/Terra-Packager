@@ -5,6 +5,7 @@ import hashlib
 import re
 import tempfile
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -13,7 +14,7 @@ from .dag_linearizer import LinearSection
 from .epub_builder import write_epub
 from .i18n import LANGUAGES, get_edition_badge
 from .pdf_builder import compile_pdf_and_cover
-from .repo_provider import ExternalRepoProvider
+from .repo_provider import CONTENT_ENTRY_TYPES, ExternalRepoProvider
 from .txt_builder import write_txt
 from .runtime import measured
 
@@ -74,13 +75,18 @@ def package_volume(
     vol = volume if volume is not None else provider.resolve_volume(volume_identifier, active_langs=active_langs, use_cache=use_cache)
     vol_num = vol["volumeNumber"]
     p_vol_title = vol["titles"].get(primary_lang) or vol["titles"]["zh"]
-
+    title_stem = sanitize_filename(p_vol_title)
+    numbered_stem = f"{vol_num}-{title_stem}" if vol_num is not None else title_stem
     if secondary_lang:
-        base_stem = f"{vol_num}-{sanitize_filename(p_vol_title)}-{primary_lang}-{secondary_lang}"
+        base_stem = f"{numbered_stem}-{primary_lang}-{secondary_lang}"
     elif primary_lang == "zh":
-        base_stem = f"{vol_num}-{sanitize_filename(p_vol_title)}"
+        base_stem = numbered_stem
     else:
-        base_stem = f"{vol_num}-{sanitize_filename(p_vol_title)}-{primary_lang}"
+        base_stem = f"{numbered_stem}-{primary_lang}"
+    # Same operator can have multiple records with the same title.
+    if vol_num is None:
+        base_stem += "-" + hashlib.sha256(vol["groupId"].encode()).hexdigest()[:12]
+    content_type = next((kind for kind, entry in CONTENT_ENTRY_TYPES.items() if entry == vol["entryType"]), "story")
 
     scenes_meta = vol["scenesMeta"]
     total_sc = len(scenes_meta)
@@ -107,12 +113,21 @@ def package_volume(
     if not sections and diagnostics.skip_missing:
         return []
 
+    divider = LinearSection(
+        scene_id="volume_" + hashlib.sha256(vol["groupId"].encode()).hexdigest()[:20],
+        raw_tag=vol_num or "",
+        titles=dict(vol["titles"]),
+        blocks=[],
+        is_divider=True,
+    )
+    sections = [divider, *(replace(section, heading_level=2) for section in sections)]
+
     return package_sections(
         volume_titles=vol["titles"],
         sections=sections,
         output_stem=base_stem,
         formats=formats,
-        output_dir=output_dir,
+        output_dir=Path(output_dir) / content_type,
         primary_lang=primary_lang,
         secondary_lang=secondary_lang,
         use_cache=use_cache,
@@ -134,6 +149,7 @@ def package_sections(
     on_progress: Optional[Callable[[str, int], None]] = None,
     volume_number: Optional[str] = None,
     group_id: Optional[str] = None,
+    epub_sections: Optional[List[LinearSection]] = None,
 ) -> List[Dict[str, Any]]:
     """Render a prepared collection of sections to the requested publication formats."""
     if primary_lang not in LANGUAGES:
@@ -152,7 +168,7 @@ def package_sections(
         raise ValueError("Cannot publish an empty collection.")
     if not output_stem or sanitize_filename(output_stem) != output_stem:
         raise ValueError("output_stem must be a valid filename without path separators.")
-    output_dir = Path(output_dir).resolve()
+    output_dir = Path(output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     results: List[Dict[str, Any]] = []
 
@@ -179,7 +195,7 @@ def package_sections(
             write_epub(
                 output_path=staging / "book.epub",
                 volume_titles=volume_titles,
-                sections=sections,
+                sections=epub_sections if epub_sections is not None else sections,
                 cover_png_bytes=cover_bytes,
                 primary_lang=primary_lang,
                 secondary_lang=secondary_lang,

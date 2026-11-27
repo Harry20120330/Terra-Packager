@@ -5,14 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .dag_linearizer import LinearSection
-from .i18n import UI_STRINGS, localize_stage_tag
-
-
-def format_utterance_line(speaker: str, text: str, lang: str) -> str:
-    colon = UI_STRINGS.get(lang, UI_STRINGS["zh"])["colon"]
-    if speaker:
-        return f"{speaker}{colon}{text}"
-    return text
+from .i18n import UI_STRINGS, format_utterance_line, localize_stage_tag
 
 
 def render_txt(

@@ -256,57 +256,25 @@
 
 #let render-utterance(blk) = {
   let indent-shift = if blk.depth > 1 { (blk.depth - 1) * 4mm } else { 0mm }
-  let has-speaker = blk.spk_p != "" or (is-bilingual and blk.spk_s != "")
-
-  let speaker-cell = [
-    #v(1.3pt)
-    #if blk.spk_p != "" [
-      #txt-p(blk.spk_p, size: 8.2pt, fill: c-accent, tracking: 0.2pt)
-    ]
-    #if is-bilingual and blk.spk_s != "" and blk.spk_s != blk.spk_p [
-      #linebreak()
-      #txt-s(blk.spk_s, size: 7.4pt, fill: c-muted, style: if s-lang == "en" { "italic" } else { "normal" })
-    ]
-  ]
-
-  let text-cell = [
+  let prose = [
     #if blk.txt_p != "" [
-      #txt-p(source-lines(blk.txt_p), size: 10.5pt, fill: c-ink)
+      #txt-p(source-lines(blk.txt_p))
     ]
     #if is-bilingual and blk.txt_s != "" [
       #if blk.txt_p != "" [ #parbreak() #v(-3pt) ]
-      #txt-s(source-lines(blk.txt_s), size: 9.4pt, fill: c-muted)
+      #txt-s(source-lines(blk.txt_s))
     ]
   ]
 
-  let content-node = if has-speaker {
-    grid(
-      columns: (24mm, 1fr),
-      column-gutter: 3mm,
-      align: (right + top, left + top),
-      speaker-cell,
-      if blk.depth > 0 {
-        block(
-          width: 100%,
-          inset: (left: 3mm, top: 0.5pt, bottom: 0.5pt),
-          stroke: (left: 0.4pt + c-rule),
-          text-cell,
-        )
-      } else {
-        text-cell
-      },
+  let content-node = if blk.depth > 0 {
+    block(
+      width: 100%,
+      inset: (left: 3mm, top: 0.5pt, bottom: 0.5pt),
+      stroke: (left: 0.4pt + c-rule),
+      prose,
     )
   } else {
-    if blk.depth > 0 {
-      block(
-        width: 100%,
-        inset: (left: 3mm, top: 0.5pt, bottom: 0.5pt),
-        stroke: (left: 0.4pt + c-rule),
-        text-cell,
-      )
-    } else {
-      block(width: 100%, above: 0pt, below: 0pt, text-cell)
-    }
+    block(width: 100%, above: 0pt, below: 0pt, prose)
   }
 
   block(width: 100%, above: 0pt, below: 11.4pt, inset: (left: indent-shift), content-node)

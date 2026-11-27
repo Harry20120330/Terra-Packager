@@ -18,6 +18,8 @@ class BuildDiagnostics:
     missing_categories: List[str] = field(default_factory=list)
     partial_scenes: Dict[str, List[str]] = field(default_factory=dict)
     fallback_scenes: List[str] = field(default_factory=list)
+    media_scenes: List[str] = field(default_factory=list)
+    source_order_scenes: List[str] = field(default_factory=list)
     on_progress: Optional[Callable[[str, int], None]] = None
     skip_missing: bool = False
 
@@ -51,6 +53,11 @@ class BuildDiagnostics:
             # visual directives or unlabeled decisions. Require actual source
             # text as well as text surviving compilation and linearization.
             source_text = set(scene.get("sourceTextLanguages", available))
+            if not source_text and set(requested) <= set(scene.get("mediaOnlyLanguages", [])):
+                if source not in self.media_scenes:
+                    self.media_scenes.append(source)
+                self._report(f"Skipping video-only scene: {source} (no printable story text).")
+                return None
             readable = {
                 lang for lang in requested
                 if lang in available and lang in source_text and any(
@@ -75,6 +82,10 @@ class BuildDiagnostics:
             return None
 
         missing = [lang for lang in requested if lang not in readable]
+        for lang, warning in scene.get("structureWarnings", {}).items():
+            if source not in self.source_order_scenes:
+                self.source_order_scenes.append(source)
+            self._report(f"Warning: {warning}; {lang} prose and choices are preserved in source order.")
         if section.alignment_status == "separate":
             if source not in self.fallback_scenes:
                 self.fallback_scenes.append(source)
@@ -91,18 +102,20 @@ class BuildDiagnostics:
         if not self.skip_missing:
             raise ValueError(
                 f"No content found for requested content type: {kind} ({label}). "
-                "Check the local data or use --content-types to select the available types."
+                "Check the local data contains all six content types and the requested languages."
             )
         if kind not in self.missing_categories:
             self.missing_categories.append(kind)
         self._report(f"Skipping missing content type: {label} ({kind}); no readable text found.")
 
     def summary(self) -> str:
-        if not (self.has_omissions or self.partial_scenes or self.fallback_scenes):
+        if not (self.has_omissions or self.partial_scenes or self.fallback_scenes or self.media_scenes or self.source_order_scenes):
             return ""
         return (
             f"Build summary: {len(self.missing_scenes)} missing scene(s), "
             f"{len(self.missing_categories)} missing content type(s), "
             f"{len(self.partial_scenes)} partially translated scene(s), "
-            f"{len(self.fallback_scenes)} separately preserved bilingual scene(s)."
+            f"{len(self.fallback_scenes)} separately preserved bilingual scene(s), "
+            f"{len(self.media_scenes)} video-only scene(s) skipped, "
+            f"{len(self.source_order_scenes)} scene(s) preserved in source order."
         )
